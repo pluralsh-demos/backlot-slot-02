@@ -129,6 +129,55 @@ describe("poster meteor api", () => {
     expect(ready.json()).toEqual({ status: "ok" });
   });
 
+  it("returns 503 from /readyz when orders table does not exist", async () => {
+    const logs = captureLogs();
+    const db = memoryOrders({
+      failSchemaCheck: true,
+      code: "42P01",
+      message: 'relation "orders" does not exist',
+    });
+    app = buildApp({ logStream: logs.stream, pool: db.pool });
+
+    const health = await app.inject({ method: "GET", url: "/healthz" });
+    const ready = await app.inject({ method: "GET", url: "/readyz" });
+
+    expect(health.statusCode).toBe(200);
+    expect(ready.statusCode).toBe(503);
+    expect(ready.json()).toEqual({ status: "not ready" });
+    expect(await counter(app, "db_errors_total", 'sqlstate="42P01"')).toBe(0);
+    expect(db.calls).toContain("SELECT 1 FROM orders LIMIT 0");
+  });
+
+  it("returns 200 from /readyz when orders table is queryable", async () => {
+    const db = memoryOrders();
+    app = buildApp({ logStream: discardLogs, pool: db.pool });
+
+    const ready = await app.inject({ method: "GET", url: "/readyz" });
+
+    expect(ready.statusCode).toBe(200);
+    expect(ready.json()).toEqual({ status: "ok" });
+    expect(db.calls).toContain("SELECT 1 FROM orders LIMIT 0");
+  });
+
+  it("counts other database errors from /readyz and returns 503", async () => {
+    const logs = captureLogs();
+    const db = memoryOrders({
+      failSchemaCheck: true,
+      code: "53300",
+      message: "sorry, too many clients already",
+    });
+    app = buildApp({ logStream: logs.stream, pool: db.pool });
+
+    const ready = await app.inject({ method: "GET", url: "/readyz" });
+
+    expect(ready.statusCode).toBe(503);
+    expect(ready.json()).toEqual({ status: "not ready" });
+    expect(await counter(app, "db_errors_total", 'sqlstate="53300"')).toBe(1);
+    const text = logs.text();
+    expect(text).toContain("53300");
+    expect(text).toContain("readiness check failed");
+  });
+
   it("exposes the telemetry series and app_build_info labels", async () => {
     app = buildApp({ logStream: discardLogs });
 
@@ -418,6 +467,7 @@ type StoredOrder = {
 function memoryOrders(options?: {
   failOn?: string;
   failConnect?: boolean;
+  failSchemaCheck?: boolean;
   code?: string;
   message?: string;
 }): {
@@ -430,6 +480,11 @@ function memoryOrders(options?: {
   const client = {
     async query<T>(sql: string, params?: unknown[]): Promise<OrderQueryResult<T>> {
       calls.push(sql);
+      if (options?.failSchemaCheck && sql.includes("SELECT 1 FROM orders LIMIT 0")) {
+        const error = new Error(options.message ?? "database error") as Error & { code?: string };
+        error.code = options.code ?? "XX000";
+        throw error;
+      }
       if (options?.failOn && sql.includes(options.failOn)) {
         const error = new Error(options.message ?? "database error") as Error & { code?: string };
         error.code = options.code ?? "XX000";
@@ -437,6 +492,9 @@ function memoryOrders(options?: {
       }
       if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") {
         return { rows: [], rowCount: null };
+      }
+      if (sql.includes("SELECT 1 FROM orders LIMIT 0")) {
+        return { rows: [], rowCount: 0 };
       }
       if (sql.includes("INSERT INTO orders")) {
         const subtotal = Number(params?.[2]);

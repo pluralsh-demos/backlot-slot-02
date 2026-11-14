@@ -27,7 +27,7 @@ What a failure looks like to a customer:
 | `api` | Product pages do not load | Checkout does not complete |
 | Postgres | The catalog still loads | `POST /api/orders` and `GET /api/orders/:number` return 503, `Orders are unavailable` |
 
-`GET /healthz` and `GET /readyz` report process health only. They do not check Postgres, so an API pod can be Ready while checkout is unavailable.
+`GET /healthz` reports process health only and does not check Postgres. `GET /readyz` checks if the `orders` table is queryable when a database is configured. An API pod is Ready only when it can serve checkout. During a database reset or when the schema is absent, `/readyz` returns 503 until migrations complete and the schema exists. Catalog-only behavior (no `DATABASE_URL`) still returns 200.
 
 A checkout that returns an order number (`PM-…`, status `received`) means the storefront, the API, and Postgres all served that request. Payment fields are required and then discarded. They are not stored.
 

@@ -7,7 +7,7 @@ import Fastify, {
 import type { Pool } from "pg";
 import { catalogOptions, getProduct, products } from "./catalog.js";
 import { hostCookiesFor, rememberHostCookies, rejectUnsafeSetCookie } from "./cookies.js";
-import { createPool, sqlStateOf } from "./db.js";
+import { checkOrdersSchema, createPool, sqlStateOf } from "./db.js";
 import { ContractLogController, logBase, routeTemplate } from "./logging.js";
 import { createMetrics } from "./metrics.js";
 import {
@@ -103,7 +103,21 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
 
   app.get("/healthz", async () => ({ status: "ok" }));
 
-  app.get("/readyz", async () => ({ status: "ok" }));
+  app.get("/readyz", async (_request, reply) => {
+    if (!orders) return { status: "ok" };
+    try {
+      const ready = await checkOrdersSchema(orders);
+      if (!ready) {
+        return reply.code(503).send({ status: "not ready" });
+      }
+      return { status: "ok" };
+    } catch (err) {
+      const sqlstate = sqlStateOf(err);
+      metrics.dbErrorsTotal.inc({ sqlstate });
+      app.log.error({ err, sqlstate }, "readiness check failed");
+      return reply.code(503).send({ status: "not ready" });
+    }
+  });
 
   app.get("/metrics", async (_request, reply) => {
     reply.type(metrics.registry.contentType);
